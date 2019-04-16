@@ -5,6 +5,9 @@ import java.net.*
 const val SERVER_CONNECTION_BACKLOG = 65536
 const val BUFFER_SIZE = 16777216       // 16 MiB communication buffer
 
+fun Socket.forceClose() = try{ close() }catch(t: Throwable){}
+
+
 class BungeeServer(
         private val listenAddr: InetAddress,
         private val port: Int,
@@ -72,8 +75,6 @@ class BungeeServer(
         routeSocket.forceClose()
         clients.remove(clientSocket, routeSocket)
     }
-
-    private fun Socket.forceClose() = try{ close() }catch(t: Throwable){}
 
     private fun Socket.forwardConnection(dest: Socket){
         val from = getInputStream()
