@@ -6,6 +6,7 @@ import java.security.PublicKey
 import java.security.Signature
 import java.util.concurrent.ThreadLocalRandom
 
+// TODO: Inherit BungeeServer
 // Reverse TCP connection router (put this on a publicly accessible server)
 // A public key is provided so that a route can authenticate itself against this router
 class BungeeRTCPRouter(
@@ -196,31 +197,6 @@ class BungeeRTCPRouter(
     }
 
     private fun ServerSocket.tryAccept() = try{ accept() }catch(e: SocketTimeoutException){ null }
-    private fun ByteArray.intify(offset: Int)
-            = this[offset].toInt().and(0xFF).or(
-            this[offset + 1].toInt().and(0xFF).shl(8)
-    ).or(
-            this[offset + 2].toInt().and(0xFF).shl(16)
-    ).or(
-            this[offset + 3].toInt().and(0xFF).shl(24)
-    )
-
-    private fun ByteArray.longify(offset: Int)
-            = this[offset].toLong().and(0xFF).or(
-            this[offset + 1].toLong().and(0xFF).shl(8)
-    ).or(
-            this[offset + 2].toLong().and(0xFF).shl(16)
-    ).or(
-            this[offset + 3].toLong().and(0xFF).shl(24)
-    ).or(
-            this[offset + 4].toLong().and(0xFF).shl(32)
-    ).or(
-            this[offset + 5].toLong().and(0xFF).shl(40)
-    ).or(
-            this[offset + 6].toLong().and(0xFF).shl(48)
-    ).or(
-            this[offset + 7].toLong().and(0xFF).shl(56)
-    )
 
     private fun makeClientUID(): Long {
         var uid: Long
@@ -254,3 +230,30 @@ class BungeeRTCPRouter(
             false
         }
 }
+
+
+fun ByteArray.intify(offset: Int)
+        = this[offset].toInt().and(0xFF).or(
+        this[offset + 1].toInt().and(0xFF).shl(8)
+).or(
+        this[offset + 2].toInt().and(0xFF).shl(16)
+).or(
+        this[offset + 3].toInt().and(0xFF).shl(24)
+)
+
+fun ByteArray.longify(offset: Int)
+        = this[offset].toLong().and(0xFF).or(
+        this[offset + 1].toLong().and(0xFF).shl(8)
+).or(
+        this[offset + 2].toLong().and(0xFF).shl(16)
+).or(
+        this[offset + 3].toLong().and(0xFF).shl(24)
+).or(
+        this[offset + 4].toLong().and(0xFF).shl(32)
+).or(
+        this[offset + 5].toLong().and(0xFF).shl(40)
+).or(
+        this[offset + 6].toLong().and(0xFF).shl(48)
+).or(
+        this[offset + 7].toLong().and(0xFF).shl(56)
+)

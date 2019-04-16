@@ -8,6 +8,7 @@ const val BUFFER_SIZE = 16777216       // 16 MiB communication buffer
 fun Socket.forceClose() = try{ close() }catch(t: Throwable){}
 
 
+// TODO: Make better
 class BungeeServer(
         private val listenAddr: InetAddress,
         private val port: Int,
