@@ -20,7 +20,7 @@ class BungeeRTCPRouter(
     private lateinit var routeSocket: Socket
     private var alive = false
     private var canStart = true
-    private val headerBuffer = ByteBuffer.allocateDirect(13) // [ID (byte)][(CUID) long][DLEN (int)]
+    private val headerBuffer = ByteBuffer.wrap(ByteArray(13)) // [ID (byte)][(CUID) long][DLEN (int)]
 
     fun listen(){
         if(!canStart) throw IllegalStateException("Already started/stopped")
@@ -35,7 +35,9 @@ class BungeeRTCPRouter(
         val checkBytes = ByteArray(256)
         val rand = ThreadLocalRandom.current()
         val fromClients = ByteArray(BUFFER_SIZE)
+        val wrappedClientBuffer = ByteBuffer.wrap(fromClients)
         val fromRoute = ByteArray(BUFFER_SIZE)
+        val wrappedRouteBuffer = ByteBuffer.wrap(fromRoute)
         var routeBytes = 0
 
 
@@ -80,9 +82,9 @@ class BungeeRTCPRouter(
             }
 
             // We have a client. Let's check if they can authenticate
-            if(readBytes >= 4 && fromClients.intify(0) == 0x13376969){ // Tell router that you would like to authenticate
+            if(readBytes >= 4 && wrappedClientBuffer.getInt(0) == 0x13376969){ // Tell router that you would like to authenticate
                 if(readBytes >= (4 + 4)){
-                    val signedDataLength = fromClients.intify(4)
+                    val signedDataLength = wrappedClientBuffer.getInt(4)
 
                     if(readBytes >= (4 + 4 + signedDataLength)){
                         // We have the signed data; let's verify its integrity
@@ -92,6 +94,7 @@ class BungeeRTCPRouter(
                         if(sig.verify(fromClients, 4 + 4, signedDataLength)){
                             // We have a verified remote route! :D
                             routeSocket = tryRoute!!
+                            println("RTCP server verified!")
                             break
                         }else{
                             // Verification failed :(
@@ -130,7 +133,7 @@ class BungeeRTCPRouter(
                     try {
                         val stream = client.getInputStream()
                         if (stream.available() > 0) {
-                            val read = stream.read(fromClients)
+                            val read = stream.read(fromClients, 0, fromClients.size)
 
                             if (read > 0 && !sendClientMessageToServer(uid, fromClients, 0, read)) {
                                 System.err.println("Unexpected endpoint disconnection")
@@ -163,21 +166,24 @@ class BungeeRTCPRouter(
                             // Parse data packet
                             if((routeBytes + read) - parsed < 13) break@parseLoop // Not enough data
 
-                            val uid = fromRoute.longify(parsed + 1)
-                            val dLen = fromRoute.intify(parsed + 1 + 8)
+                            val uid = wrappedRouteBuffer.getLong(parsed +1)
+                            val dLen = wrappedRouteBuffer.getInt(parsed + 1 + 8)
 
                             if((routeBytes + read) - parsed < 13 + dLen) break@parseLoop // All the data hasn't arrived
 
-                            clients.keys.firstOrNull { clients[it] == uid }
-                                    ?.getOutputStream()
-                                    ?.write(fromRoute, parsed + 13, dLen)
-
+                            try {
+                                clients.keys.firstOrNull { clients[it] == uid }
+                                        ?.getOutputStream()
+                                        ?.write(fromRoute, parsed + 13, dLen)
+                            }catch(e: Throwable){
+                                notifyClientDisconnect(uid)
+                            }
                             parsed += 13 + dLen
                         }
 
                         1.toByte() -> {
                             // Handle disconnection
-                            val uid = fromRoute.longify(parsed + 1)
+                            val uid = wrappedRouteBuffer.getLong(parsed + 1)
                             if(clients.values.contains(uid)){
                                 val toDrop = clients.keys.firstOrNull { clients[it] == uid }
                                 if(toDrop != null) {
@@ -230,30 +236,3 @@ class BungeeRTCPRouter(
             false
         }
 }
-
-
-fun ByteArray.intify(offset: Int)
-        = this[offset].toInt().and(0xFF).or(
-        this[offset + 1].toInt().and(0xFF).shl(8)
-).or(
-        this[offset + 2].toInt().and(0xFF).shl(16)
-).or(
-        this[offset + 3].toInt().and(0xFF).shl(24)
-)
-
-fun ByteArray.longify(offset: Int)
-        = this[offset].toLong().and(0xFF).or(
-        this[offset + 1].toLong().and(0xFF).shl(8)
-).or(
-        this[offset + 2].toLong().and(0xFF).shl(16)
-).or(
-        this[offset + 3].toLong().and(0xFF).shl(24)
-).or(
-        this[offset + 4].toLong().and(0xFF).shl(32)
-).or(
-        this[offset + 5].toLong().and(0xFF).shl(40)
-).or(
-        this[offset + 6].toLong().and(0xFF).shl(48)
-).or(
-        this[offset + 7].toLong().and(0xFF).shl(56)
-)

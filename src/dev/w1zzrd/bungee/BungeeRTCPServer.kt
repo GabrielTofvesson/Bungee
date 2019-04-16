@@ -22,9 +22,10 @@ class BungeeRTCPServer(
     private var canStart = true
     private val serverSocket = Socket()
     private val buffer = ByteArray(BUFFER_SIZE)
+    private val wrappedServerBuffer = ByteBuffer.wrap(buffer)
     private val clientBuffer = ByteArray(BUFFER_SIZE)
     private var alive = false
-    private val headerBuffer = ByteBuffer.allocateDirect(13)
+    private val headerBuffer = ByteBuffer.wrap(ByteArray(13))
 
     fun start(){
         if(!canStart) throw IllegalStateException("Already started/stopped")
@@ -42,14 +43,8 @@ class BungeeRTCPServer(
         sig.initSign(privateKey)
         sig.update(buffer, 0, 256)
         val signLen = sig.sign(buffer, 8, buffer.size - 8)
-        buffer[0] = 0x69.toByte()
-        buffer[1] = 0x69.toByte()
-        buffer[2] = 0x37.toByte()
-        buffer[3] = 0x13.toByte()
-        buffer[4] = signLen.and(0xFF).toByte()
-        buffer[5] = signLen.ushr(8).and(0xFF).toByte()
-        buffer[6] = signLen.ushr(16).and(0xFF).toByte()
-        buffer[7] = signLen.ushr(24).and(0xFF).toByte()
+        wrappedServerBuffer.putInt(0, 0x13376969)
+        wrappedServerBuffer.putInt(4, signLen)
 
         // Send signature
         write.write(buffer, 0, 8 + signLen)
@@ -62,7 +57,7 @@ class BungeeRTCPServer(
 
             var parsed = 0
             parseLoop@while(bufferBytes - parsed > 9){
-                val uid = buffer.longify(parsed + 1)
+                val uid = wrappedServerBuffer.getLong(parsed + 1)
 
                 when(buffer[parsed]){
                     0.toByte() -> {
@@ -73,7 +68,7 @@ class BungeeRTCPServer(
                     1.toByte() -> {
                         // Data from client
                         if(bufferBytes - parsed > 13){
-                            val dLen = buffer.intify(parsed + 9)
+                            val dLen = wrappedServerBuffer.getInt(parsed + 9)
                             if(bufferBytes < parsed + dLen) break@parseLoop // Not enough data
                             try {
                                 // Send data to server
@@ -104,7 +99,7 @@ class BungeeRTCPServer(
             for((uid, client) in vClients){
                 try {
                     val stream = client.getInputStream()
-                    if (read.available() > 0) {
+                    if (stream.available() > 0) {
                         val clientRead = stream.read(clientBuffer, 0, clientBuffer.size)
                         if (clientRead > 0) sendVClientPacket(uid, clientBuffer, 0, clientRead)
                     }
@@ -116,7 +111,7 @@ class BungeeRTCPServer(
     }
 
     fun sendVClientPacket(uid: Long, data: ByteArray, off: Int, len: Int){
-        notifyClientAction(uid, 0, data.size)
+        notifyClientAction(uid, 0, len)
         sendMessageToRouter(data, off, len)
     }
     fun notifyClientDrop(uid: Long) = notifyClientAction(uid, 1)
