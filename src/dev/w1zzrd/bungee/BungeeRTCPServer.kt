@@ -1,12 +1,16 @@
 package dev.w1zzrd.bungee
 
-import java.net.InetAddress
-import java.net.InetSocketAddress
-import java.net.ServerSocket
-import java.net.Socket
+import java.io.File
+import java.net.*
 import java.nio.ByteBuffer
+import java.nio.file.Files
+import java.nio.file.Path
+import java.security.KeyFactory
 import java.security.PrivateKey
 import java.security.Signature
+import java.security.spec.PKCS8EncodedKeySpec
+import java.security.spec.X509EncodedKeySpec
+import java.util.concurrent.atomic.AtomicBoolean
 
 // TODO: Inherit BungeeServer
 // Private key used to authenticate against router
@@ -14,22 +18,39 @@ class BungeeRTCPServer(
         private val routerAddr: InetAddress,
         private val routerPort: Int,
         private val routeTo: InetAddress,
-        private val routePort: Int,
+        private var routePort: Int,
         private val privateKey: PrivateKey
 ){
+
+    constructor(routerAddr: InetAddress, routerPort: Int, routeTo: InetAddress, routePort: Int, keyName: String):
+            this(
+                    routerAddr,
+                    routerPort,
+                    routeTo,
+                    routePort,
+                    KeyFactory.getInstance("RSA")
+                            .generatePrivate(PKCS8EncodedKeySpec(File(keyName).readBytes()))
+            )
+
+
+
     // A map of a client UID to the "virtual client" (a socket from this server to the provided route endpoint)
     private val vClients = HashMap<Long, Socket>()
-    private var canStart = true
-    private val serverSocket = Socket()
+    private val canStart = AtomicBoolean(true)
+    private var serverSocket = Socket()
     private val buffer = ByteArray(BUFFER_SIZE)
     private val wrappedServerBuffer = ByteBuffer.wrap(buffer)
     private val clientBuffer = ByteArray(BUFFER_SIZE)
-    private var alive = false
+    private val alive = AtomicBoolean(false)
     private val headerBuffer = ByteBuffer.wrap(ByteArray(13))
 
     fun start(){
-        if(!canStart) throw IllegalStateException("Already started/stopped")
-        canStart = false
+        synchronized(canStart) {
+            if (!canStart.get()) return@start
+            canStart.set(false)
+        }
+
+        println("Starting RTCP server")
 
         serverSocket.connect(InetSocketAddress(routerAddr, routerPort))
 
@@ -37,8 +58,13 @@ class BungeeRTCPServer(
         val read = serverSocket.getInputStream()
         val write = serverSocket.getOutputStream()
         var readCount = 0
-        while(readCount < 256) readCount += read.read(buffer, readCount, buffer.size - readCount)
-
+        try {
+            while (readCount < 256) readCount += read.read(buffer, readCount, buffer.size - readCount)
+        }catch(e: Exception){
+            println("Encountered an error when authenticating")
+            stop()
+            return
+        }
         val sig = Signature.getInstance("NONEwithRSA")
         sig.initSign(privateKey)
         sig.update(buffer, 0, 256)
@@ -50,26 +76,29 @@ class BungeeRTCPServer(
         write.write(buffer, 0, 8 + signLen)
 
         var bufferBytes = 0
-        alive = true
-        while(alive){
+        synchronized(alive){alive.set(true)}
+        while(synchronized(alive){alive.get()}){
             if(read.available() > 0)
                 bufferBytes += read.read(buffer, bufferBytes, buffer.size - bufferBytes)
 
             var parsed = 0
-            parseLoop@while(bufferBytes - parsed > 9){
+            parseLoop@while((bufferBytes - parsed) > 9){
+                val action = wrappedServerBuffer.get(parsed)
                 val uid = wrappedServerBuffer.getLong(parsed + 1)
 
-                when(buffer[parsed]){
-                    0.toByte() -> {
-                        // New client
-                        vClients[uid] = Socket(routeTo, routePort)
-                    }
+                when(action){
+                    // New client
+                    0.toByte() -> vClients[uid] = Socket(routeTo, routePort, InetAddress.getByName("localhost"), 0)
 
                     1.toByte() -> {
                         // Data from client
-                        if(bufferBytes - parsed > 13){
+                        if((bufferBytes - parsed) > 13){
+                            // Get packet size
                             val dLen = wrappedServerBuffer.getInt(parsed + 9)
-                            if(bufferBytes < parsed + dLen) break@parseLoop // Not enough data
+
+                            // Check if entire packet has been received yet
+                            if((bufferBytes - parsed - 13) < dLen) break@parseLoop // Not enough data
+
                             try {
                                 // Send data to server
                                 vClients[uid]?.getOutputStream()?.write(buffer, parsed + 13, dLen)
@@ -81,18 +110,21 @@ class BungeeRTCPServer(
                         }else break@parseLoop // Not enough data
                     }
 
-                    2.toByte() -> {
-                        // Remote disconnection
-                        vClients[uid]?.forceClose()
-                        vClients.remove(uid)
-                    }
+                    // Remote disconnection
+                    2.toByte() -> vClients.remove(uid)?.forceClose()
                 }
 
                 parsed += 9
             }
 
-            System.arraycopy(buffer, parsed, buffer, 0, bufferBytes - parsed)
-            bufferBytes -= parsed
+            try{
+                if(parsed > bufferBytes) println("Packet read overflow (by ${parsed - bufferBytes} bytes) detected!")
+                System.arraycopy(buffer, Math.min(bufferBytes, parsed), buffer, 0, Math.max(0, bufferBytes - parsed))
+                bufferBytes = Math.max(0, bufferBytes - parsed)
+            }catch(e: Exception){
+                println("bufferBytes: $bufferBytes\nparsed: $parsed\nlength: ${buffer.size}\n")
+                throw e
+            }
 
 
             // Accept data from route endpoint
@@ -123,5 +155,26 @@ class BungeeRTCPServer(
     }
     fun sendMessageToRouter(data: ByteArray, off: Int, len: Int){
         serverSocket.getOutputStream().write(data, off, len)
+    }
+
+    fun stop(newPort: Int = routePort) = synchronized(canStart){
+        synchronized(alive) {
+            if (alive.get()) {
+                try {
+                    sendMessageToRouter(byteArrayOf(2), 0, 1)
+                } catch (e: Exception) {
+                } finally {
+                    try {
+                        serverSocket.forceClose()
+                    } catch (e: Exception) {
+                    }
+                }
+            }
+            alive.set(false)
+            canStart.set(true)
+            routePort = newPort
+            serverSocket = Socket()
+            println("RTCP server Stopped")
+        }
     }
 }

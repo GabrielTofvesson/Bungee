@@ -1,9 +1,13 @@
 package dev.w1zzrd.bungee
 
+import java.io.File
 import java.net.*
 import java.nio.ByteBuffer
+import java.security.KeyFactory
 import java.security.PublicKey
 import java.security.Signature
+import java.security.spec.X509EncodedKeySpec
+import java.util.*
 import java.util.concurrent.ThreadLocalRandom
 
 // TODO: Inherit BungeeServer
@@ -12,17 +16,29 @@ import java.util.concurrent.ThreadLocalRandom
 class BungeeRTCPRouter(
         private val listenAddr: InetAddress,
         private val port: Int,
-        private val routePK: PublicKey
+        private val routePK: PublicKey,
+        var verbose: Boolean = true
 ){
+    constructor(listenAddr: InetAddress, port: Int, keyName: String, verbose: Boolean = true):
+            this(
+                    listenAddr,
+                    port,
+                    KeyFactory.getInstance("RSA")
+                            .generatePublic(X509EncodedKeySpec(File(keyName).readBytes())),
+                    verbose
+            )
+
+
     // Map a client to a unique (long) id
     private val clients = HashMap<Socket, Long>()
-    private val router = ServerSocket()
+    private var router = ServerSocket()
     private lateinit var routeSocket: Socket
     private var alive = false
     private var canStart = true
     private val headerBuffer = ByteBuffer.wrap(ByteArray(13)) // [ID (byte)][(CUID) long][DLEN (int)]
 
-    fun listen(){
+
+    fun listen() = try{
         if(!canStart) throw IllegalStateException("Already started/stopped")
         canStart = false
         alive = true
@@ -47,12 +63,23 @@ class BungeeRTCPRouter(
             readBytes = 0
         }
 
+        var timeout = -1L
+
+        fun status(pref: String, msg: String) = if(verbose) println("$pref: $msg") else Unit
+        fun info(msg: String) = status("INFO", msg)
+        fun fail(msg: String) = status("FAIL", msg)
+        fun success(msg: String) = status("SUCCESS", msg)
+
         while(true){
             if(tryRoute == null){
                 tryRoute = router.tryAccept()
                 if(tryRoute != null){
+                    timeout = System.currentTimeMillis() + 2000L
+                    info("Got RTCP candidate: "+(tryRoute!!.remoteSocketAddress))
                     rand.nextBytes(checkBytes)
                     try{
+                        info("Sending stage 1: ${Arrays.toString(checkBytes)}")
+
                         // Send the bytes to be signed to remove host
                         tryRoute!!.getOutputStream().write(checkBytes)
                     }catch (e: Throwable){
@@ -62,8 +89,12 @@ class BungeeRTCPRouter(
                 }else continue
             }
 
-            if(tryRoute!!.isClosed || !tryRoute!!.isConnected){
+            // Auth timeout
+            val timedOut = (timeout > 0 && timeout < System.currentTimeMillis())
+            if(tryRoute!!.isClosed || !tryRoute!!.isConnected || timedOut){
                 disconnectRouteServer()
+                fail(if(timedOut) "Candidate timed out!" else "Candidate disconnected!")
+                timeout = -1L
                 continue
             }
             try {
@@ -71,6 +102,7 @@ class BungeeRTCPRouter(
                 if (read.available() > 0) {
                     if(read.available() + readBytes > fromClients.size){
                         disconnectRouteServer()
+                        fail("Candidate sent too much data!")
                         continue
                     }
                     readBytes += read.read(fromClients, readBytes, fromClients.size - readBytes)
@@ -82,11 +114,21 @@ class BungeeRTCPRouter(
             }
 
             // We have a client. Let's check if they can authenticate
-            if(readBytes >= 4 && wrappedClientBuffer.getInt(0) == 0x13376969){ // Tell router that you would like to authenticate
+            if(readBytes >= 4){ // Tell router that you would like to authenticate
+                if(wrappedClientBuffer.getInt(0) != 0x13376969){
+                    disconnectRouteServer()
+                    fail("Candidate sent improper header")
+                    continue
+                }
+
+                info("Got valid header")
+
                 if(readBytes >= (4 + 4)){
                     val signedDataLength = wrappedClientBuffer.getInt(4)
 
                     if(readBytes >= (4 + 4 + signedDataLength)){
+                        info("Checking signature...")
+
                         // We have the signed data; let's verify its integrity
                         val sig = Signature.getInstance("NONEwithRSA") // Raw bytes signed with RSA ;)
                         sig.initVerify(routePK)
@@ -94,11 +136,12 @@ class BungeeRTCPRouter(
                         if(sig.verify(fromClients, 4 + 4, signedDataLength)){
                             // We have a verified remote route! :D
                             routeSocket = tryRoute!!
-                            println("RTCP server verified!")
+                            success("Candidate RTCP server verified!")
                             break
                         }else{
                             // Verification failed :(
                             disconnectRouteServer()
+                            fail("Candidate RTCP server failed verification step!")
                             continue
                         }
                     }
@@ -160,9 +203,11 @@ class BungeeRTCPRouter(
             if(routeStream.available() > 0){
                 val read = routeStream.read(fromRoute, routeBytes, fromRoute.size - routeBytes)
                 var parsed = 0
-                parseLoop@while((routeBytes + read) - parsed > 9){
+                parseLoop@while((routeBytes + read) - parsed > 0){
                     when(fromRoute[parsed]){
                         0.toByte() -> {
+                            if((routeBytes + read) - parsed < 10) break@parseLoop
+
                             // Parse data packet
                             if((routeBytes + read) - parsed < 13) break@parseLoop // Not enough data
 
@@ -182,6 +227,8 @@ class BungeeRTCPRouter(
                         }
 
                         1.toByte() -> {
+                            if((routeBytes + read) - parsed < 10) break@parseLoop
+
                             // Handle disconnection
                             val uid = wrappedRouteBuffer.getLong(parsed + 1)
                             if(clients.values.contains(uid)){
@@ -193,6 +240,12 @@ class BungeeRTCPRouter(
                             }
                             parsed += 9
                         }
+
+                        2.toByte() -> {
+                            for(client in clients) client.key.forceClose()
+                            clients.clear()
+                            break@acceptLoop
+                        }
                     }
                 }
 
@@ -200,6 +253,11 @@ class BungeeRTCPRouter(
                 routeBytes = (routeBytes + read) - parsed // Amount of unread bytes after parsing
             }
         }
+    }catch(e: Exception){
+        e.printStackTrace()
+    }finally{
+        try{ router.close() }catch(e: Exception){}
+        router = ServerSocket()
     }
 
     private fun ServerSocket.tryAccept() = try{ accept() }catch(e: SocketTimeoutException){ null }
